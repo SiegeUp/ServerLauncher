@@ -1,6 +1,6 @@
 install.sh — piped via wget.
-Get PAT in github Settings -> Developer settings -> Fine granted token. Generate a token, selecting SiegeUp organisation.
+To get token open install.sh in raw mode from github. Find a better solution to use PAT in future.
 
 ```
-curl -s -H "Authorization: token YOUR_PAT_TOKEN" -H "Accept: application/vnd.github.v3.raw" https://api.github.com/repos/SiegeUp/ServerLauncher/contents/install.sh?ref=main | bash
+wget -qO- https://raw.githubusercontent.com/SiegeUp/ServerLauncher/refs/heads/main/install.sh?token=<TOKEN> | bash
 ```
