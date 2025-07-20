@@ -55,6 +55,7 @@ ExecStartPre=/usr/bin/git pull origin main
 ExecStart=/usr/bin/node launcher.js --port=8443
 Restart=always
 RestartSec=5
+EnvironmentFile=/etc/environment
 
 [Install]
 WantedBy=multi-user.target
