@@ -88,8 +88,8 @@ app.post('/upload', upload.single('gameZip'), async (req, res, next) => {
 app.post('/servers/launch', async (req, res, next) => {
   try {
     const { version, args = [] } = req.body;
-    const id = Date.now().toString();
     const port = settings.nextPort++;
+    const id = port;
     settings.servers[id] = { version, args, port };
     saveSettings();
 
