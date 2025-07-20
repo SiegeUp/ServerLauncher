@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# install.sh — piped via wget:
-#   wget -qO- https://raw.githubusercontent.com/yourorg/SiegeUpLauncher/main/install.sh | bash
 
 set -euo pipefail
 
@@ -13,7 +11,7 @@ fi
 LAUNCH_DIR="/home/siegeuplauncher/launcher"
 if [[ ! -d $LAUNCH_DIR ]]; then
   sudo -u siegeuplauncher git clone \
-    https://github.com/yourorg/SiegeUpLauncher.git "$LAUNCH_DIR"
+    https://github.com/SiegeUp/ServerLauncher.git "$LAUNCH_DIR"
 fi
 
 cd "$LAUNCH_DIR"
