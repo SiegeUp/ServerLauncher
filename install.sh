@@ -6,25 +6,9 @@ set -euo pipefail
 apt-get update
 apt-get install -y curl git build-essential unzip
 
-# 1) Install Node.js and npm (using nvm for latest LTS)
-export NVM_DIR="/usr/local/nvm"
-if [[ ! -d $NVM_DIR ]]; then
-  mkdir -p "$NVM_DIR"
-  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-fi
-
-# Load nvm
-export NVM_DIR="/usr/local/nvm"
-source "$NVM_DIR/nvm.sh"
-
-# Install and use latest LTS
-nvm install --lts
-nvm use --lts
-nvm alias default 'lts/*'
-
-# Ensure global access for node and npm
-ln -sf "$(command -v node)" /usr/bin/node
-ln -sf "$(command -v npm)"  /usr/bin/npm
+# 1) Install Node.js LTS + npm via NodeSource
+curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+apt-get install -y nodejs
 
 # 2) Create service user if missing
 if ! id siegeuplauncher &>/dev/null; then
