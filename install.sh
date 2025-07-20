@@ -2,12 +2,36 @@
 
 set -euo pipefail
 
-# 1) create service user
+# 0) Prerequisites
+apt-get update
+apt-get install -y curl git build-essential unzip
+
+# 1) Install Node.js and npm (using nvm for latest LTS)
+export NVM_DIR="/usr/local/nvm"
+if [[ ! -d $NVM_DIR ]]; then
+  mkdir -p "$NVM_DIR"
+  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+fi
+
+# Load nvm
+export NVM_DIR="/usr/local/nvm"
+source "$NVM_DIR/nvm.sh"
+
+# Install and use latest LTS
+nvm install --lts
+nvm use --lts
+nvm alias default 'lts/*'
+
+# Ensure global access for node and npm
+ln -sf "$(command -v node)" /usr/bin/node
+ln -sf "$(command -v npm)"  /usr/bin/npm
+
+# 2) Create service user if missing
 if ! id siegeuplauncher &>/dev/null; then
   useradd --create-home --shell /bin/bash siegeuplauncher
 fi
 
-# 2) clone & install
+# 3) Clone repo
 LAUNCH_DIR="/home/siegeuplauncher/launcher"
 if [[ ! -d $LAUNCH_DIR ]]; then
   sudo -u siegeuplauncher git clone \
@@ -15,9 +39,9 @@ if [[ ! -d $LAUNCH_DIR ]]; then
 fi
 
 cd "$LAUNCH_DIR"
-npm ci --omit=dev
+sudo -u siegeuplauncher npm ci --omit=dev
 
-# 3) systemd unit
+# 4) Create systemd service
 cat >/etc/systemd/system/siegeup-launcher.service <<EOF
 [Unit]
 Description=SiegeUp Game Launcher
@@ -28,7 +52,7 @@ Type=simple
 User=siegeuplauncher
 WorkingDirectory=$LAUNCH_DIR
 ExecStartPre=/usr/bin/git pull origin main
-ExecStart=$(which node) launcher.js --port=8443
+ExecStart=/usr/bin/node launcher.js --port=8443
 Restart=always
 RestartSec=5
 
@@ -36,6 +60,6 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# 4) enable & start
+# 5) Enable and start the service
 systemctl daemon-reload
 systemctl enable --now siegeup-launcher
