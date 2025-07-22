@@ -122,6 +122,8 @@ app.post('/launch', async (req, res) => {
 
   if (!exe) return res.status(404).json({ error: 'Executable not found' });
 
+  fs.chmodSync(exe, 0o755);
+
   const child = spawn(exe, ['--port', port, ...args], { detached: true });
   children.set(port, child); // <-- use port directly here
 
