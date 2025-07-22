@@ -43,6 +43,7 @@ const upload = multer({
 const portArg = process.argv.find(a => a.startsWith('--port='))?.split('=')[1];
 const port = portArg ? parseInt(portArg, 10) : DEFAULT_PORT;
 
+const localIP = await axios.get('https://api.ipify.org').then(res => res.data); // fetch external IP
 const pems = selfsigned.generate(
   [{ name: 'commonName', value: os.hostname() }],
   {
@@ -51,9 +52,11 @@ const pems = selfsigned.generate(
     algorithm: 'sha256',
     extensions: [
       {
-        name: 'subjectAltName', altNames: [
-          { type: 2, value: os.hostname() },
-          { type: 7, ip: '127.0.0.1' }
+        name: 'subjectAltName',
+        altNames: [
+          { type: 2, value: os.hostname() },   // DNS
+          { type: 7, ip: '127.0.0.1' },        // localhost
+          { type: 7, ip: localIP }             // <- Add external IP
         ]
       }
     ]
