@@ -19,11 +19,12 @@ const KEY_PEM = path.join(BASE_DIR, 'key.pem');
 const SETTINGS_FILE = path.join(BASE_DIR, 'settings.json');
 const ORCH_URL = process.env.ORCHESTRATOR_URL || 'https://siegeup.com/orchestrator';
 const DEFAULT_PORT = 8443;
+const BASE_SERVER_PORT = 9000;
 
 fs.mkdirSync(BASE_DIR, { recursive: true });
 fs.mkdirSync(BUILDS_DIR, { recursive: true });
 
-let settings = { nextPort: 9000, servers: {} };
+let settings = { version: '', count: 0 };
 try {
   settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
 } catch {
@@ -43,7 +44,7 @@ const upload = multer({
 const portArg = process.argv.find(a => a.startsWith('--port='))?.split('=')[1];
 const port = portArg ? parseInt(portArg, 10) : DEFAULT_PORT;
 
-const localIP = await axios.get('https://api.ipify.org').then(res => res.data); // fetch external IP
+const localIP = await axios.get('https://api.ipify.org').then(res => res.data);
 const pems = selfsigned.generate(
   [{ name: 'commonName', value: os.hostname() }],
   {
@@ -54,16 +55,15 @@ const pems = selfsigned.generate(
       {
         name: 'subjectAltName',
         altNames: [
-          { type: 2, value: os.hostname() },   // DNS
-          { type: 7, ip: '127.0.0.1' },        // localhost
-          { type: 7, ip: localIP }             // <- Add external IP
+          { type: 2, value: os.hostname() },
+          { type: 7, ip: '127.0.0.1' },
+          { type: 7, ip: localIP }
         ]
       }
     ]
   }
 );
 
-// Register with orchestrator before starting server
 await axios.post(`${ORCH_URL}/register`, {
   name: os.hostname(),
   port,
@@ -98,10 +98,42 @@ const findFileRecursive = (dir, filename) => {
   return null;
 };
 
-app.get('/archives', async (_, res) => {
-  const files = fs.readdirSync(BUILDS_DIR);
-  res.json({ archives: files });
-});
+const startManagedServers = () => {
+  // Kill all old
+  for (const child of children.values()) child.kill();
+  children.clear();
+
+  const executableName = os.platform() == 'win32' ? 'SiegeUpServer.exe' : 'SiegeUpLinuxServer.x86_64';
+  const exe = findFileRecursive(path.join(BUILDS_DIR, settings.version), executableName);
+  if (!exe) {
+    console.warn(`Executable for ${settings.version} not found`);
+    return;
+  }
+
+  for (let i = 0; i < settings.count; ++i) {
+    const port = BASE_SERVER_PORT + i;
+    const id = port;
+
+    const spawnAndWatch = () => {
+      const child = spawn(exe, ['--port', port], { detached: true });
+      children.set(id, child);
+      console.log(`Server ${id} started on port ${port}`);
+
+      child.on('exit', () => {
+        console.warn(`Server ${id} exited, restarting...`);
+        children.delete(id);
+        setTimeout(spawnAndWatch, 1000);
+      });
+
+      child.on('error', err => {
+        console.error(`Error in server ${id}:`, err);
+        children.delete(id);
+      });
+    };
+
+    spawnAndWatch();
+  }
+};
 
 app.post('/upload', upload.single('gameZip'), async (req, res) => {
   await fs.createReadStream(req.file.path)
@@ -111,75 +143,33 @@ app.post('/upload', upload.single('gameZip'), async (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/launch', async (req, res) => {
-  const { version, args = [], port: requestedPort } = req.body;
-  const port = requestedPort || settings.nextPort++;
-  const id = port;
-  settings.servers[id] = { version, args, port };
+app.post('/servers/launch', async (req, res) => {
+  const { version, count } = req.body;
+  if (!version || typeof count !== 'number') return res.status(400).json({ error: 'Missing version or count' });
+
+  settings.version = version;
+  settings.count = count;
   saveSettings();
+  startManagedServers();
 
-  let exe = findFileRecursive(path.join(BUILDS_DIR, version), os.platform() == "win32" ? 'SiegeUpServer.exe' : 'SiegeUpLinuxServer.x86_64');
-
-  if (!exe) return res.status(404).json({ error: 'Executable not found' });
-
-  fs.chmodSync(exe, 0o755);
-
-  const child = spawn(exe, ['--port', port, ...args], { detached: true });
-  children.set(port, child); // <-- use port directly here
-
-  child.on('exit', () => {
-    console.warn(`Server ${port} exited; restarting`);
-    children.delete(port);
-    app.handle({ method: 'POST', url: '/servers/launch', body: { version, args, port } }, res);
-  });
-
-  console.log(`Server ${id} started on port ${port}`);
-  res.json({ id, port });
-});
-
-app.post('/servers/:id/restart', async (req, res) => {
-  const { id } = req.params;
-  const meta = settings.servers[id];
-  if (!meta) return res.status(404).json({ error: 'Not found' });
-
-  const child = children.get(id);
-  if (child) child.kill();
-  else app.handle({ method: 'POST', url: '/servers/launch', body: meta }, res);
-
-  res.json({ ok: true, message: `Restarting ${id}` });
+  res.json({ ok: true, version, count });
 });
 
 app.get('/status', async (_, res) => {
-  const servers = Object.entries(settings.servers).map(([port, m]) => ({
-    id: port,
-    ...m,
-    running: children.has(parseInt(port, 10)) // <- ensure it's a number
+  const running = Array.from(children.entries()).map(([id, proc]) => ({
+    id, port: id, running: true, pid: proc.pid
   }));
-  res.json({ servers });
-});
 
+  const archives = fs.readdirSync(BUILDS_DIR).filter(f => fs.statSync(path.join(BUILDS_DIR, f)).isDirectory());
 
-app.get('/platform', async (_, res) => {
-  const platform = process.platform === 'win32' ? 'windows' : process.platform;
-  res.json({ platform });
-});
-
-app.get('/servers', async (_, res) => {
-  const list = Object.entries(settings.servers).map(([id, m]) => ({
-    id, ...m, running: children.has(id)
-  }));
-  res.json(list);
-});
-
-app.post('/settings', async (req, res) => {
-  Object.assign(settings, req.body);
-  saveSettings();
-  res.json(settings);
-});
-
-app.post('/update', async (_, res) => {
-  res.json({ ok: true });
-  process.exit(0);
+  res.json({
+    hostname: os.hostname(),
+    platform: process.platform === 'win32' ? 'windows' : process.platform,
+    version: settings.version,
+    expectedCount: settings.count,
+    running,
+    archives
+  });
 });
 
 app.use((err, req, res, _) => {
@@ -189,4 +179,7 @@ app.use((err, req, res, _) => {
 });
 
 https.createServer(httpsOpts, app)
-  .listen(port, () => console.log(`Launcher listening on port ${port}`));
+  .listen(port, () => {
+    console.log(`Launcher listening on port ${port}`);
+    if (settings.version && settings.count > 0) startManagedServers();
+  });
