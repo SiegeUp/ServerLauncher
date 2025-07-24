@@ -115,7 +115,7 @@ const startManagedServers = () => {
     const id = port;
 
     const spawnAndWatch = () => {
-      const child = spawn(exe, ['--port', port], { detached: true });
+      const child = spawn(exe, ['--server_port', port]);
       children.set(id, child);
       console.log(`Server ${id} started on port ${port}`);
 
