@@ -145,9 +145,16 @@ app.post('/upload', upload.single('gameZip'), async (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/servers/launch', async (req, res) => {
+app.post('/launch', async (req, res) => {
   const { servers } = req.body;
-  if (!Array.isArray(servers)) return res.status(400).json({ error: 'Missing or invalid servers array' });
+  if (!Array.isArray(servers))
+    return res.status(400).json({ error: 'Missing or invalid servers array' });
+
+  // Check for duplicate ports
+  const ports = servers.map(s => s.port);
+  const portSet = new Set(ports);
+  if (ports.length !== portSet.size)
+    return res.status(400).json({ error: 'Duplicate port detected in servers array' });
 
   const nextSettings = servers.map((s, i) => ({
     name: s.name || `Server ${i + 1}`,
@@ -179,6 +186,25 @@ app.post('/servers/launch', async (req, res) => {
 app.post('/update', (_, res) => {
   res.json({ ok: true });
   process.exit(0);
+});
+
+app.post('/restart', async (req, res) => {
+  const portToRestart = parseInt(req.query.port, 10);
+
+  const serverConfig = settings.servers.find(s => s.port === portToRestart);
+  if (!serverConfig)
+    return res.status(404).json({ error: 'Server not found' });
+
+  const proc = children.get(portToRestart);
+  if (proc) {
+    proc.once('exit', () => {
+      res.json({ ok: true, restarted: true });
+    });
+    proc.kill();
+    children.delete(portToRestart);
+  } else {
+    res.json({ ok: true, restarted: false, message: 'Server was not running, will start if configured' });
+  }
 });
 
 app.post('/purge', (_, res) => {
