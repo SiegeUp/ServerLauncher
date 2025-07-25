@@ -19,12 +19,11 @@ const KEY_PEM = path.join(BASE_DIR, 'key.pem');
 const SETTINGS_FILE = path.join(BASE_DIR, 'settings.json');
 const ORCH_URL = process.env.ORCHESTRATOR_URL || 'https://siegeup.com/orchestrator';
 const DEFAULT_PORT = 8443;
-const BASE_SERVER_PORT = 9000;
 
 fs.mkdirSync(BASE_DIR, { recursive: true });
 fs.mkdirSync(BUILDS_DIR, { recursive: true });
 
-let settings = { version: '', count: 0 };
+let settings = { servers: [] };
 try {
   settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
 } catch {
@@ -43,6 +42,7 @@ const upload = multer({
 
 const portArg = process.argv.find(a => a.startsWith('--port='))?.split('=')[1];
 const port = portArg ? parseInt(portArg, 10) : DEFAULT_PORT;
+const watchIntervalMs = 2000;
 
 const localIP = await axios.get('https://api.ipify.org').then(res => res.data);
 const pems = selfsigned.generate(
@@ -69,9 +69,12 @@ await axios.post(`${ORCH_URL}/register`, {
   port,
   cert: pems.cert
 }, {
-  httpsAgent: ORCH_URL.startsWith('https')
-    ? new https.Agent({ cert: pems.cert, key: pems.private, ca: pems.cert, rejectUnauthorized: false })
-    : undefined
+  httpsAgent: new https.Agent({
+    cert: pems.cert,
+    key: pems.private,
+    ca: pems.cert,
+    rejectUnauthorized: false
+  })
 });
 
 fs.writeFileSync(CERT_PEM, pems.cert);
@@ -98,42 +101,51 @@ const findFileRecursive = (dir, filename) => {
   return null;
 };
 
-const startManagedServers = () => {
-  // Kill all old
-  for (const child of children.values()) child.kill();
-  children.clear();
+const serverWatcherLoop = async () => {
+  const platform = os.platform();
+  const executableName = platform === 'win32' ? 'SiegeUpServer.exe' : 'SiegeUpLinuxServer.x86_64';
 
-  const executableName = os.platform() == 'win32' ? 'SiegeUpServer.exe' : 'SiegeUpLinuxServer.x86_64';
-  const exe = findFileRecursive(path.join(BUILDS_DIR, settings.version), executableName);
-  if (!exe) {
-    console.warn(`Executable for ${settings.version} not found`);
-    return;
+  const desiredPorts = new Set(settings.servers.map(s => s.port));
+  const currentPorts = new Set(children.keys());
+
+  // Stop orphaned processes
+  for (const port of currentPorts) {
+    if (!desiredPorts.has(port)) {
+      console.log(`Stopping server on port ${port} (no longer in config)`);
+      children.get(port)?.kill();
+      children.delete(port);
+    }
   }
 
-  for (let i = 0; i < settings.count; ++i) {
-    const port = BASE_SERVER_PORT + i;
-    const id = port;
+  // Start missing servers
+  for (const { version, port, args = [] } of settings.servers) {
+    if (children.has(port)) continue;
 
-    const spawnAndWatch = () => {
-      const child = spawn(exe, ['--server_port', port]);
-      children.set(id, child);
-      console.log(`Server ${id} started on port ${port}`);
+    const exe = findFileRecursive(path.join(BUILDS_DIR, version), executableName);
+    if (!exe) {
+      console.warn(`Executable not found for version "${version}"`);
+      continue;
+    }
 
-      child.on('exit', () => {
-        console.warn(`Server ${id} exited, restarting...`);
-        children.delete(id);
-        setTimeout(spawnAndWatch, 1000);
-      });
+    const child = spawn(exe, ['--server_port', port, ...args]);
+    children.set(port, child);
+    console.log(`Started server ${port} with version "${version}"`);
 
-      child.on('error', err => {
-        console.error(`Error in server ${id}:`, err);
-        children.delete(id);
-      });
-    };
+    child.on('exit', (code, signal) => {
+      console.warn(`Server ${port} exited with code ${code || 'unknown'}, signal ${signal || 'none'}`);
+      children.delete(port);
+    });
 
-    spawnAndWatch();
+    child.on('error', err => {
+      console.error(`Error in server ${port}:`, err);
+      children.delete(port);
+    });
   }
 };
+
+// Start loop
+setInterval(serverWatcherLoop, watchIntervalMs);
+
 
 app.post('/upload', upload.single('gameZip'), async (req, res) => {
   await fs.createReadStream(req.file.path)
@@ -144,31 +156,50 @@ app.post('/upload', upload.single('gameZip'), async (req, res) => {
 });
 
 app.post('/servers/launch', async (req, res) => {
-  const { version, count } = req.body;
-  if (!version || typeof count !== 'number') return res.status(400).json({ error: 'Missing version or count' });
+  const { servers } = req.body;
+  if (!Array.isArray(servers)) return res.status(400).json({ error: 'Missing or invalid servers array' });
 
-  settings.version = version;
-  settings.count = count;
+  settings.servers = servers;
   saveSettings();
-  startManagedServers();
 
-  res.json({ ok: true, version, count });
+  res.json({ ok: true });
+});
+
+app.post('/update', (_, res) => {
+  res.json({ ok: true });
+  process.exit(0);
 });
 
 app.get('/status', async (_, res) => {
-  const running = Array.from(children.entries()).map(([id, proc]) => ({
-    id, port: id, running: true, pid: proc.pid
-  }));
+  const platform = process.platform === 'win32' ? 'windows' : process.platform;
+  const memoryTotalMB = Math.round(os.totalmem() / 1024 / 1024);
 
-  const archives = fs.readdirSync(BUILDS_DIR).filter(f => fs.statSync(path.join(BUILDS_DIR, f)).isDirectory());
+  const servers = settings.servers.map(({ version, port, args }) => {
+    const proc = children.get(port);
+    const memMB = proc?.pid
+      ? Math.round(process.memoryUsage().rss / 1024 / 1024)
+      : 0;
+
+    return {
+      version,
+      port,
+      args,
+      pid: proc?.pid || null,
+      running: !!proc,
+      memoryMB: memMB
+    };
+  });
+
+  const archives = fs.readdirSync(BUILDS_DIR).filter(f =>
+    fs.statSync(path.join(BUILDS_DIR, f)).isDirectory()
+  );
 
   res.json({
     hostname: os.hostname(),
-    platform: process.platform === 'win32' ? 'windows' : process.platform,
-    version: settings.version,
-    expectedCount: settings.count,
-    running,
-    archives
+    platform,
+    servers,
+    archives,
+    memoryMB: memoryTotalMB
   });
 });
 
@@ -181,5 +212,4 @@ app.use((err, req, res, _) => {
 https.createServer(httpsOpts, app)
   .listen(port, () => {
     console.log(`Launcher listening on port ${port}`);
-    if (settings.version && settings.count > 0) startManagedServers();
   });

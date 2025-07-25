@@ -36,6 +36,7 @@ Type=simple
 User=siegeuplauncher
 WorkingDirectory=$LAUNCH_DIR
 ExecStartPre=/usr/bin/git pull origin main
+ExecStartPre=/usr/bin/npm ci --omit=dev
 ExecStart=/usr/bin/node launcher.js --port=8443
 Restart=always
 RestartSec=5
