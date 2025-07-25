@@ -136,6 +136,11 @@ app.post('/upload', upload.single('gameZip'), async (req, res) => {
   await fs.createReadStream(req.file.path)
     .pipe(unzipper.Extract({ path: BUILDS_DIR }))
     .promise();
+
+  // Fix: Make binaries executable after unzip
+  const exePath = findFileRecursive(BUILDS_DIR, 'SiegeUpLinuxServer.x86_64');
+  if (exePath) fs.chmodSync(exePath, 0o755);
+
   fs.unlinkSync(req.file.path);
   res.json({ ok: true });
 });
