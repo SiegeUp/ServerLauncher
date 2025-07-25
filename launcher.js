@@ -19,6 +19,7 @@ const KEY_PEM = path.join(BASE_DIR, 'key.pem');
 const SETTINGS_FILE = path.join(BASE_DIR, 'settings.json');
 const ORCH_URL = process.env.ORCHESTRATOR_URL || 'https://siegeup.com/orchestrator';
 const DEFAULT_PORT = 8443;
+const watchIntervalMs = 2000;
 
 fs.mkdirSync(BASE_DIR, { recursive: true });
 fs.mkdirSync(BUILDS_DIR, { recursive: true });
@@ -42,7 +43,6 @@ const upload = multer({
 
 const portArg = process.argv.find(a => a.startsWith('--port='))?.split('=')[1];
 const port = portArg ? parseInt(portArg, 10) : DEFAULT_PORT;
-const watchIntervalMs = 2000;
 
 const localIP = await axios.get('https://api.ipify.org').then(res => res.data);
 const pems = selfsigned.generate(
@@ -105,47 +105,32 @@ const serverWatcherLoop = async () => {
   const platform = os.platform();
   const executableName = platform === 'win32' ? 'SiegeUpServer.exe' : 'SiegeUpLinuxServer.x86_64';
 
-  const desiredPorts = new Set(settings.servers.map(s => s.port));
-  const currentPorts = new Set(children.keys());
+  for (const s of settings.servers) {
+    if (children.has(s.port)) continue;
+    if (!s.run) continue;
 
-  // Stop orphaned processes
-  for (const port of currentPorts) {
-    if (!desiredPorts.has(port)) {
-      console.log(`Stopping server on port ${port} (no longer in config)`);
-      children.get(port)?.kill();
-      children.delete(port);
-    }
-  }
-
-  // Start missing servers
-  for (const { version, port, args = [] } of settings.servers) {
-    if (children.has(port)) continue;
-
-    const exe = findFileRecursive(path.join(BUILDS_DIR, version), executableName);
+    const exe = findFileRecursive(path.join(BUILDS_DIR, s.version), executableName);
     if (!exe) {
-      console.warn(`Executable not found for version "${version}"`);
+      console.warn(`Executable not found for "${s.version}"`);
       continue;
     }
 
-    const child = spawn(exe, ['--server_port', port, ...args]);
-    children.set(port, child);
-    console.log(`Started server ${port} with version "${version}"`);
+    const child = spawn(exe, ['--server_port', s.port, ...s.args]);
+    children.set(s.port, child);
+    console.log(`Started server ${s.port} with version "${s.version}"`);
 
     child.on('exit', (code, signal) => {
-      console.warn(`Server ${port} exited with code ${code || 'unknown'}, signal ${signal || 'none'}`);
-      children.delete(port);
+      console.warn(`Server ${s.port} exited (code: ${code}, signal: ${signal})`);
+      children.delete(s.port);
     });
 
     child.on('error', err => {
-      console.error(`Error in server ${port}:`, err);
-      children.delete(port);
+      console.error(`Error in server ${s.port}:`, err);
+      children.delete(s.port);
     });
   }
 };
-
-// Start loop
 setInterval(serverWatcherLoop, watchIntervalMs);
-
 
 app.post('/upload', upload.single('gameZip'), async (req, res) => {
   await fs.createReadStream(req.file.path)
@@ -159,9 +144,30 @@ app.post('/servers/launch', async (req, res) => {
   const { servers } = req.body;
   if (!Array.isArray(servers)) return res.status(400).json({ error: 'Missing or invalid servers array' });
 
-  settings.servers = servers;
-  saveSettings();
+  const nextSettings = servers.map((s, i) => ({
+    name: s.name || `Server ${i + 1}`,
+    visible: s.visible ?? false,
+    version: s.version,
+    port: s.port,
+    args: s.args || [],
+    run: s.run ?? true
+  }));
 
+  const nextMap = new Map(nextSettings.map(s => [s.port, s]));
+
+  for (const { port, version } of settings.servers) {
+    const existingChild = children.get(port);
+    const next = nextMap.get(port);
+    const shouldStop = !next || next.version !== version || !next.run;
+    if (shouldStop && existingChild) {
+      console.log(`Stopping server ${port} (version changed or removed)`);
+      existingChild.kill();
+      children.delete(port);
+    }
+  }
+
+  settings.servers = nextSettings;
+  saveSettings();
   res.json({ ok: true });
 });
 
@@ -170,11 +176,37 @@ app.post('/update', (_, res) => {
   process.exit(0);
 });
 
+app.post('/purge', (_, res) => {
+  const runningVersions = new Set(
+    Array.from(children.values()).map((proc, i) => {
+      const s = settings.servers[i];
+      return s?.version;
+    }).filter(Boolean)
+  );
+
+  const dirs = fs.readdirSync(BUILDS_DIR);
+  let purged = [];
+
+  for (const dir of dirs) {
+    const fullPath = path.join(BUILDS_DIR, dir);
+    if (
+      fs.statSync(fullPath).isDirectory() &&
+      !runningVersions.has(dir)
+    ) {
+      fs.rmSync(fullPath, { recursive: true, force: true });
+      purged.push(dir);
+      console.log(`Purged archive: ${dir}`);
+    }
+  }
+
+  res.json({ ok: true, purged });
+});
+
 app.get('/status', async (_, res) => {
   const platform = process.platform === 'win32' ? 'windows' : process.platform;
   const memoryTotalMB = Math.round(os.totalmem() / 1024 / 1024);
 
-  const servers = settings.servers.map(({ version, port, args }) => {
+  const servers = settings.servers.map(({ version, port, args, name, visible, run }) => {
     const proc = children.get(port);
     const memMB = proc?.pid
       ? Math.round(process.memoryUsage().rss / 1024 / 1024)
@@ -184,6 +216,9 @@ app.get('/status', async (_, res) => {
       version,
       port,
       args,
+      name: name || '',
+      visible: !!visible,
+      run: !!run,
       pid: proc?.pid || null,
       running: !!proc,
       memoryMB: memMB
