@@ -89,15 +89,22 @@ const httpsOpts = {
   rejectUnauthorized: false
 };
 
-const findFileRecursive = (dir, filename) => {
+const findExecutable = (dir) => {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
+
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      const found = findFileRecursive(fullPath, filename);
+      const found = findExecutable(fullPath);
       if (found) return found;
-    } else if (entry.name === filename) return fullPath;
+    } else if (
+      !entry.name.includes('UnityCrashHandler') &&
+      (entry.name.endsWith('.exe') || entry.name.endsWith('.x86_64'))
+    ) {
+      return fullPath;
+    }
   }
+
   return null;
 };
 
@@ -109,7 +116,7 @@ const serverWatcherLoop = async () => {
     if (children.has(s.port)) continue;
     if (!s.run) continue;
 
-    const exe = findFileRecursive(path.join(BUILDS_DIR, s.version), executableName);
+    const exe = findExecutable(path.join(BUILDS_DIR, s.version));
     if (!exe) {
       console.warn(`Executable not found for "${s.version}"`);
       continue;
@@ -133,17 +140,21 @@ const serverWatcherLoop = async () => {
 setInterval(serverWatcherLoop, watchIntervalMs);
 
 app.post('/upload', upload.single('gameZip'), async (req, res) => {
+  const version = path.basename(req.file.originalname, '.zip') || `archive_${Date.now()}`;
+  const targetPath = path.join(BUILDS_DIR, version);
+
   await fs.createReadStream(req.file.path)
-    .pipe(unzipper.Extract({ path: BUILDS_DIR }))
+    .pipe(unzipper.Extract({ path: targetPath }))
     .promise();
 
-  // Fix: Make binaries executable after unzip
-  const exePath = findFileRecursive(BUILDS_DIR, 'SiegeUpLinuxServer.x86_64');
+  const exePath = findExecutable(targetPath);
   if (exePath) fs.chmodSync(exePath, 0o755);
 
   fs.unlinkSync(req.file.path);
+
+  console.log(`Uploaded and extracted ${req.file.originalname} into ${targetPath}`);
   res.json({ ok: true });
-});
+});;
 
 app.post('/launch', async (req, res) => {
   const { servers } = req.body;
@@ -167,10 +178,10 @@ app.post('/launch', async (req, res) => {
 
   const nextMap = new Map(nextSettings.map(s => [s.port, s]));
 
-  for (const { port, version } of settings.servers) {
+  for (const { port, version, args } of settings.servers) {
     const existingChild = children.get(port);
     const next = nextMap.get(port);
-    const shouldStop = !next || next.version !== version || !next.run;
+    const shouldStop = !next || next.version !== version || next.args.join(' ') !== args.join(' ') || !next.run;
     if (shouldStop && existingChild) {
       console.log(`Stopping server ${port} (version changed or removed)`);
       existingChild.kill();
