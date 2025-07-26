@@ -90,19 +90,25 @@ const httpsOpts = {
 };
 
 const findExecutable = (dir) => {
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  try
+  {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
 
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      const found = findExecutable(fullPath);
-      if (found) return found;
-    } else if (
-      !entry.name.includes('UnityCrashHandler') &&
-      (entry.name.endsWith('.exe') || entry.name.endsWith('.x86_64'))
-    ) {
-      return fullPath;
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const found = findExecutable(fullPath);
+        if (found) return found;
+      } else if (
+        !entry.name.includes('UnityCrashHandler') &&
+        (entry.name.endsWith('.exe') || entry.name.endsWith('.x86_64'))
+      ) {
+        return fullPath;
+      }
     }
+  }
+  catch (err) {
+    console.error(`Error reading directory ${dir}:`, err);
   }
 
   return null;
