@@ -159,11 +159,10 @@ const serverWatcherLoop = async () => {
       child.on('exit', (code, signal) => {
         const sErr = stderrLines.join('\n');
 
-        if (code === null) {
+        if (signal) { // Check if the exit was due to a signal
           console.warn(`Server ${s.port} exited due to signal: ${signal}\n${sErr}`);
           serverErrors.set(s.port, `Exited due to signal: ${signal}\n${sErr}`);
-        }
-        if (code !== 0) {
+        } else if (code !== 0) { // Check if the exit was due to a non-zero exit code
           console.warn(`Server ${s.port} exited with code ${code}\n${sErr}`);
           serverErrors.set(s.port, `Exited with code ${code}\n${sErr}`);
         }
