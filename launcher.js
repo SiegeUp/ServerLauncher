@@ -24,6 +24,19 @@ const watchIntervalMs = 2000;
 fs.mkdirSync(BASE_DIR, { recursive: true });
 fs.mkdirSync(BUILDS_DIR, { recursive: true });
 
+let gitHash = 'unknown';
+try {
+  gitHash = fs.readFileSync('.git/HEAD', 'utf8').trim();
+  if (gitHash.startsWith('ref:')) {
+    const refPath = path.join('.git', gitHash.split(' ')[1]);
+    gitHash = fs.readFileSync(refPath, 'utf8').trim().slice(0, 7);
+  } else {
+    gitHash = gitHash.slice(0, 7);
+  }
+} catch {
+  console.warn('Could not determine Git commit hash');
+}
+
 let settings = { servers: [] };
 try {
   settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
@@ -115,9 +128,6 @@ const findExecutable = (dir) => {
 };
 
 const serverWatcherLoop = async () => {
-  const platform = os.platform();
-  const executableName = platform === 'win32' ? 'SiegeUpServer.exe' : 'SiegeUpLinuxServer.x86_64';
-
   for (const s of settings.servers) {
     if (children.has(s.port)) continue;
     if (!s.run) continue;
@@ -252,7 +262,8 @@ app.post('/purge', (_, res) => {
 
 app.get('/status', async (_, res) => {
   const platform = process.platform === 'win32' ? 'windows' : process.platform;
-  const memoryTotalMB = Math.round(os.totalmem() / 1024 / 1024);
+  const memoryMB = Math.round(os.totalmem() / 1024 / 1024);
+  const usedMemoryMB = memoryMB - Math.round(os.freemem() / 1024 / 1024);
 
   const servers = settings.servers.map(({ version, port, args, name, visible, run }) => {
     const proc = children.get(port);
@@ -269,7 +280,8 @@ app.get('/status', async (_, res) => {
       run: !!run,
       pid: proc?.pid || null,
       running: !!proc,
-      memoryMB: memMB
+      memoryMB: memMB,
+      commit: gitHash
     };
   });
 
@@ -282,7 +294,8 @@ app.get('/status', async (_, res) => {
     platform,
     servers,
     archives,
-    memoryMB: memoryTotalMB
+    memoryMB,
+    usedMemoryMB,
   });
 });
 
