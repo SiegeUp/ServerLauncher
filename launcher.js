@@ -144,13 +144,14 @@ const serverWatcherLoop = async () => {
       const child = spawn(exe, ['--server_port', s.port, ...s.args]);
 
       children.set(s.port, child);
-      launchErrors.delete(s.port); // clear old error on success
 
       console.log(`Started server ${s.port} with version "${s.version}"`);
 
       child.on('exit', (code, signal) => {
-        console.warn(`Server ${s.port} exited (code: ${code}, signal: ${signal})`);
-        children.delete(s.port);
+        if (code !== 0) {
+          console.warn(`Server ${s.port} exited with code ${code}`);
+          serverErrors.set(s.port, `Exited with code ${code}`);
+        }
       });
 
       child.on('error', err => {
