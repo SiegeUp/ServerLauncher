@@ -46,6 +46,7 @@ try {
 const saveSettings = () => fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
 
 const children = new Map();
+const launchErrors = new Map();
 const app = express();
 app.use(express.json());
 
@@ -103,8 +104,7 @@ const httpsOpts = {
 };
 
 const findExecutable = (dir) => {
-  try
-  {
+  try {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
@@ -134,23 +134,36 @@ const serverWatcherLoop = async () => {
 
     const exe = findExecutable(path.join(BUILDS_DIR, s.version));
     if (!exe) {
-      console.warn(`Executable not found for "${s.version}"`);
+      const msg = `Executable not found for "${s.version}"`;
+      console.warn(msg);
+      launchErrors.set(s.port, msg);
       continue;
     }
 
-    const child = spawn(exe, ['--server_port', s.port, ...s.args]);
-    children.set(s.port, child);
-    console.log(`Started server ${s.port} with version "${s.version}"`);
+    try {
+      const child = spawn(exe, ['--server_port', s.port, ...s.args]);
 
-    child.on('exit', (code, signal) => {
-      console.warn(`Server ${s.port} exited (code: ${code}, signal: ${signal})`);
-      children.delete(s.port);
-    });
+      children.set(s.port, child);
+      launchErrors.delete(s.port); // clear old error on success
 
-    child.on('error', err => {
-      console.error(`Error in server ${s.port}:`, err);
-      children.delete(s.port);
-    });
+      console.log(`Started server ${s.port} with version "${s.version}"`);
+
+      child.on('exit', (code, signal) => {
+        console.warn(`Server ${s.port} exited (code: ${code}, signal: ${signal})`);
+        children.delete(s.port);
+      });
+
+      child.on('error', err => {
+        const msg = `Error in server ${s.port}: ${err.message}`;
+        console.error(msg);
+        launchErrors.set(s.port, msg);
+        children.delete(s.port);
+      });
+    } catch (err) {
+      const msg = `Failed to start server ${s.port}: ${err.message}`;
+      console.error(msg);
+      launchErrors.set(s.port, msg);
+    }
   }
 };
 setInterval(serverWatcherLoop, watchIntervalMs);
@@ -281,7 +294,8 @@ app.get('/status', async (_, res) => {
       pid: proc?.pid || null,
       running: !!proc,
       memoryMB: memMB,
-      commit: gitHash
+      commit: gitHash,
+      launchError: launchErrors.get(port) || null
     };
   });
 
