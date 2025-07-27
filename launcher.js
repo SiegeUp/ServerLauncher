@@ -167,6 +167,8 @@ const serverWatcherLoop = async () => {
           console.warn(`Server ${s.port} exited with code ${code}\n${sErr}`);
           serverErrors.set(s.port, `Exited with code ${code}\n${sErr}`);
         }
+
+        children.delete(s.port);
       });
 
       child.on('error', err => {
