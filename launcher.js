@@ -141,7 +141,7 @@ const serverWatcherLoop = async () => {
     }
 
     try {
-      const child = spawn(exe, ['--server_port', s.port, ...s.args]);
+      const child = spawn(exe, ['--server-port', s.port, ...s.args]);
 
       const tailN = 20;
       const stderrLines = [];
