@@ -143,14 +143,29 @@ const serverWatcherLoop = async () => {
     try {
       const child = spawn(exe, ['--server_port', s.port, ...s.args]);
 
+      const tailN = 20;
+      const stderrLines = [];
+      child.stderr?.on('data', data => {
+        const lines = data.toString().split('\n').filter(Boolean);
+        stderrLines.push(...lines);
+        if (stderrLines.length > tailN)
+          stderrLines.splice(0, stderrLines.length - tailN);
+      });
+
       children.set(s.port, child);
 
       console.log(`Started server ${s.port} with version "${s.version}"`);
 
       child.on('exit', (code, signal) => {
+        const sErr = stderrLines.join('\n');
+
+        if (code === null) {
+          console.warn(`Server ${s.port} exited due to signal: ${signal}\n${sErr}`);
+          serverErrors.set(s.port, `Exited due to signal: ${signal}\n${sErr}`);
+        }
         if (code !== 0) {
-          console.warn(`Server ${s.port} exited with code ${code}`);
-          serverErrors.set(s.port, `Exited with code ${code}`);
+          console.warn(`Server ${s.port} exited with code ${code}\n${sErr}`);
+          serverErrors.set(s.port, `Exited with code ${code}\n${sErr}`);
         }
       });
 
