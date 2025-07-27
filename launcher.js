@@ -46,7 +46,7 @@ try {
 const saveSettings = () => fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
 
 const children = new Map();
-const launchErrors = new Map();
+const serverErrors = new Map();
 const app = express();
 app.use(express.json());
 
@@ -136,7 +136,7 @@ const serverWatcherLoop = async () => {
     if (!exe) {
       const msg = `Executable not found for "${s.version}"`;
       console.warn(msg);
-      launchErrors.set(s.port, msg);
+      serverErrors.set(s.port, msg);
       continue;
     }
 
@@ -157,13 +157,13 @@ const serverWatcherLoop = async () => {
       child.on('error', err => {
         const msg = `Error in server ${s.port}: ${err.message}`;
         console.error(msg);
-        launchErrors.set(s.port, msg);
+        serverErrors.set(s.port, msg);
         children.delete(s.port);
       });
     } catch (err) {
       const msg = `Failed to start server ${s.port}: ${err.message}`;
       console.error(msg);
-      launchErrors.set(s.port, msg);
+      serverErrors.set(s.port, msg);
     }
   }
 };
@@ -296,7 +296,7 @@ app.get('/status', async (_, res) => {
       running: !!proc,
       memoryMB: memMB,
       commit: gitHash,
-      launchError: launchErrors.get(port) || null
+      launchError: serverErrors.get(port) || null
     };
   });
 
