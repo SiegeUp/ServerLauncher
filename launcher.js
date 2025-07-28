@@ -128,6 +128,8 @@ const findExecutable = (dir) => {
 };
 
 const shutdownChild = async (port, child) => {
+  console.log(`Shutting down server ${port}...`);
+
   if (!child?.pid) return;
 
   try {
@@ -278,8 +280,15 @@ app.post('/launch', async (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/update', (_, res) => {
+app.post('/update', async (_, res) => {
   res.json({ ok: true });
+  for (const [port, child] of children.entries()) {
+    try {
+      await shutdownChild(port, child);
+    } catch (err) {
+      console.error(`Failed to shutdown server on port ${port}:`, err);
+    }
+  }
   process.exit(0);
 });
 
@@ -292,11 +301,7 @@ app.post('/restart', async (req, res) => {
 
   const proc = children.get(portToRestart);
   if (proc) {
-    proc.once('exit', () => {
-      res.json({ ok: true, restarted: true });
-    });
-    proc.kill();
-    children.delete(portToRestart);
+    await shutdownChild(portToRestart, proc);
   } else {
     res.json({ ok: true, restarted: false, message: 'Server was not running, will start if configured' });
   }
