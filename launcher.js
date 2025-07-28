@@ -305,6 +305,7 @@ app.post('/restart', async (req, res) => {
   } else {
     res.json({ ok: true, restarted: false, message: 'Server was not running, will start if configured' });
   }
+  res.json({ ok: true, restarted: true });
 });
 
 app.post('/purge', (_, res) => {
