@@ -127,6 +127,46 @@ const findExecutable = (dir) => {
   return null;
 };
 
+const shutdownChild = async (port, child) => {
+  if (!child?.pid) return;
+
+  try {
+    child.kill('SIGTERM');
+  } catch (e) {
+    console.warn(`Failed to send SIGTERM to server ${port}: ${e.message}`);
+  }
+
+  const checkIntervalMs = 100;
+  const maxWaitMs = 2000;
+  let waited = 0;
+
+  while (waited < maxWaitMs) {
+    try {
+      process.kill(child.pid, 0); // still alive
+      await new Promise(resolve => setTimeout(resolve, checkIntervalMs));
+      waited += checkIntervalMs;
+    } catch {
+      break; // process is dead
+    }
+  }
+
+  try {
+    process.kill(child.pid, 0); // still alive?
+    console.warn(`Server ${port} did not exit after SIGTERM, sending SIGKILL`);
+    child.kill('SIGKILL');
+  } catch {
+    // Already dead
+  }
+
+  try {
+    process.kill(child.pid, 0);
+    console.error(`Server ${port} still alive after SIGKILL`);
+  } catch {
+    console.log(`Server ${port} has stopped`);
+    children.delete(port);
+  }
+};
+
 const serverWatcherLoop = async () => {
   for (const s of settings.servers) {
     if (children.has(s.port)) continue;
@@ -229,9 +269,7 @@ app.post('/launch', async (req, res) => {
     const next = nextMap.get(port);
     const shouldStop = !next || next.version !== version || next.args.join(' ') !== args.join(' ') || !next.run;
     if (shouldStop && existingChild) {
-      console.log(`Stopping server ${port} (version changed or removed)`);
-      existingChild.kill();
-      children.delete(port);
+      await shutdownChild(port, existingChild);
     }
   }
 
