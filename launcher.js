@@ -4,6 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import https from 'https';
+import net from 'net';
 import express from 'express';
 import axios from 'axios';
 import selfsigned from 'selfsigned';
@@ -132,42 +133,61 @@ const shutdownChild = async (port, child) => {
 
   if (!child?.pid) return;
 
-  try {
-    child.kill('SIGTERM');
-  } catch (e) {
-    console.warn(`Failed to send SIGTERM to server ${port}: ${e.message}`);
+  try { child.kill('SIGTERM'); } catch {}
+
+  const killedGracefully = await waitForPortToBeFree(port, 2000);
+
+  if (!killedGracefully) {
+    console.warn(`Port ${port} still in use, sending SIGKILL`);
+    try { child.kill('SIGKILL'); } catch {}
+    await waitForPortToBeFree(port, 1000);
   }
 
-  const checkIntervalMs = 100;
-  const maxWaitMs = 2000;
-  let waited = 0;
-
-  while (waited < maxWaitMs) {
-    try {
-      process.kill(child.pid, 0); // still alive
-      await new Promise(resolve => setTimeout(resolve, checkIntervalMs));
-      waited += checkIntervalMs;
-    } catch {
-      break; // process is dead
-    }
-  }
-
-  try {
-    process.kill(child.pid, 0); // still alive?
-    console.warn(`Server ${port} did not exit after SIGTERM, sending SIGKILL`);
-    child.kill('SIGKILL');
-  } catch {
-    // Already dead
-  }
-
-  try {
-    process.kill(child.pid, 0);
-    console.error(`Server ${port} still alive after SIGKILL`);
-  } catch {
+  const stillInUse = !(await isPortFree(port));
+  if (stillInUse)
+    console.error(`Server ${port} still alive after forced kill`);
+  else {
     console.log(`Server ${port} has stopped`);
     children.delete(port);
   }
 };
+;
+
+function isPortFree(port) {
+  return new Promise(resolve => {
+    const tester = net.createServer();
+    tester.once('error', () => resolve(false));
+    tester.once('listening', () => tester.close(() => resolve(true)));
+    tester.listen(port, '0.0.0.0');
+  });
+}
+
+async function waitForPortToBeFree(port, timeoutMs = 3000, intervalMs = 100) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await isPortFree(port)) return true;
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+  return false;
+}
+
+async function cleanUpLogDirectory(logDir) {
+  try {
+    const files = fs.readdirSync(logDir)
+      .filter(f => f.endsWith('.log'))
+      .map(f => ({ name: f, time: fs.statSync(path.join(logDir, f)).mtime }))
+      .sort((a, b) => b.time - a.time);
+
+    if (files.length > 10) {
+      const toDelete = files.slice(10);
+      for (const file of toDelete) {
+        fs.unlinkSync(path.join(logDir, file.name));
+      }
+    }
+  } catch (err) {
+    console.error(`Error clean up log directory for port ${s.port}:`, err);
+  }
+}
 
 const serverWatcherLoop = async () => {
   for (const s of settings.servers) {
@@ -183,7 +203,24 @@ const serverWatcherLoop = async () => {
     }
 
     try {
-      const child = spawn(exe, ['--server-port', s.port, '--server_port', s.port, ...s.args]);
+      const logDir = path.join(LOGS_DIR, `${s.port}`);
+      fs.mkdirSync(logDir, { recursive: true });
+      cleanUpLogDirectory(logDir);
+    } catch (err) {
+      console.error(`Error creating log directory for port ${s.port}:`, err);
+      continue;
+    }
+
+    try {
+      const now = new Date().toISOString().replace(/[:.]/g, '-');
+      const logFile = path.join(logDir, `${now}.log`);
+
+      const child = spawn(exe, [
+        `-logFile`, logFile,
+        '--server-port', s.port,
+        '--server_port', s.port,
+        ...s.args
+      ]);
 
       const tailN = 20;
       const stderrLines = [];
@@ -198,7 +235,7 @@ const serverWatcherLoop = async () => {
 
       console.log(`Started server ${s.port} with version "${s.version}"`);
 
-      child.on('exit', (code, signal) => {
+      child.on('exit', async (code, signal) => {
         const sErr = stderrLines.join('\n');
 
         if (signal) { // Check if the exit was due to a signal
@@ -209,7 +246,11 @@ const serverWatcherLoop = async () => {
           serverErrors.set(s.port, `Exited with code ${code}\n${sErr}`);
         }
 
-        children.delete(s.port);
+        await waitForPortToBeFree(port, 2000);
+
+        if (await isPortFree(s.port)) {
+          children.delete(s.port);
+        }
       });
 
       child.on('error', err => {
@@ -332,6 +373,27 @@ app.post('/purge', (_, res) => {
   }
 
   res.json({ ok: true, purged });
+});
+
+app.get('/logs/:port/:index?', (req, res) => {
+  const port = req.params.port;
+  const index = parseInt(req.params.index || '0', 10);
+  const logDir = path.join(LOGS_DIR, `${port}`);
+
+  if (!fs.existsSync(logDir))
+    return res.status(404).json({ error: 'No logs for this port' });
+
+  const files = fs.readdirSync(logDir)
+    .filter(f => f.endsWith('.log'))
+    .map(f => ({ name: f, time: fs.statSync(path.join(logDir, f)).mtime }))
+    .sort((a, b) => b.time - a.time);
+
+  if (index >= files.length)
+    return res.status(404).json({ error: 'Log index out of range' });
+
+  const file = files[index];
+  const filePath = path.join(logDir, file.name);
+  res.sendFile(filePath);
 });
 
 app.get('/status', async (_, res) => {
