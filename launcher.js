@@ -389,8 +389,15 @@ app.get('/logs/:port', (req, res) => {
     return res.status(404).json({ error: 'Log index out of range' });
 
   const file = files[index];
-  const filePath = path.join(logDir, file.name);
-  res.sendFile(filePath);
+  let filePath = path.join(logDir, file.name);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Log file not found' });
+  }
+  const fileContent = fs.readFileSync(filePath, 'utf8');
+  // sendFile doesn't work, so just send it as text
+  res.setHeader('Content-Type', 'text/plain');
+  res.send(fileContent);
 });
 
 app.get('/status', async (_, res) => {
