@@ -15,6 +15,7 @@ import { spawn } from 'child_process';
 const HOME = os.homedir();
 const BASE_DIR = process.env.SETTINGS_DIR || path.join(HOME, '.siegeup');
 const BUILDS_DIR = process.env.BUILDS_DIR || path.join(BASE_DIR, 'builds');
+const LOGS_DIR = path.join(BASE_DIR, 'logs');
 const CERT_PEM = path.join(BASE_DIR, 'cert.pem');
 const KEY_PEM = path.join(BASE_DIR, 'key.pem');
 const SETTINGS_FILE = path.join(BASE_DIR, 'settings.json');
@@ -24,6 +25,7 @@ const watchIntervalMs = 2000;
 
 fs.mkdirSync(BASE_DIR, { recursive: true });
 fs.mkdirSync(BUILDS_DIR, { recursive: true });
+fs.mkdirSync(LOGS_DIR, { recursive: true });
 
 let gitHash = 'unknown';
 try {
@@ -173,6 +175,7 @@ async function waitForPortToBeFree(port, timeoutMs = 3000, intervalMs = 100) {
 
 async function cleanUpLogDirectory(logDir) {
   try {
+    fs.mkdirSync(logDir, { recursive: true });
     const files = fs.readdirSync(logDir)
       .filter(f => f.endsWith('.log'))
       .map(f => ({ name: f, time: fs.statSync(path.join(logDir, f)).mtime }))
@@ -202,14 +205,8 @@ const serverWatcherLoop = async () => {
       continue;
     }
 
-    try {
-      const logDir = path.join(LOGS_DIR, `${s.port}`);
-      fs.mkdirSync(logDir, { recursive: true });
-      cleanUpLogDirectory(logDir);
-    } catch (err) {
-      console.error(`Error creating log directory for port ${s.port}:`, err);
-      continue;
-    }
+    const logDir = path.join(LOGS_DIR, `${s.port}`);
+    cleanUpLogDirectory(logDir);
 
     try {
       const now = new Date().toISOString().replace(/[:.]/g, '-');
@@ -375,9 +372,9 @@ app.post('/purge', (_, res) => {
   res.json({ ok: true, purged });
 });
 
-app.get('/logs/:port/:index?', (req, res) => {
+app.get('/logs/:port', (req, res) => {
   const port = req.params.port;
-  const index = parseInt(req.params.index || '0', 10);
+  const index = parseInt(req.query.index || '0', 10);
   const logDir = path.join(LOGS_DIR, `${port}`);
 
   if (!fs.existsSync(logDir))
