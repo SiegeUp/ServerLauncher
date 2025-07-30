@@ -395,9 +395,7 @@ app.get('/logs/:port', (req, res) => {
     return res.status(404).json({ error: 'Log file not found' });
   }
   const fileContent = fs.readFileSync(filePath, 'utf8');
-  // sendFile doesn't work, so just send it as text
-  res.setHeader('Content-Type', 'text/plain');
-  res.send(fileContent);
+  res.json({ data: fileContent, name: file.name, launchTime: file.time.toISOString() });
 });
 
 app.get('/status', async (_, res) => {
