@@ -11,6 +11,7 @@ import selfsigned from 'selfsigned';
 import multer from 'multer';
 import unzipper from 'unzipper';
 import { spawn } from 'child_process';
+import osu from 'node-os-utils';
 
 const HOME = os.homedir();
 const BASE_DIR = process.env.SETTINGS_DIR || path.join(HOME, '.siegeup');
@@ -403,6 +404,14 @@ app.get('/status', async (_, res) => {
   const memoryMB = Math.round(os.totalmem() / 1024 / 1024);
   const usedMemoryMB = memoryMB - Math.round(os.freemem() / 1024 / 1024);
 
+  // Get CPU usage percentage
+  let cpuUsagePercent = 0;
+  try {
+    cpuUsagePercent = await osu.cpu.usage();
+  } catch (err) {
+    console.warn('Failed to get CPU usage:', err.message);
+  }
+
   const servers = settings.servers.map(({ version, port, args, name, visible, run }) => {
     const proc = children.get(port);
     const memMB = proc?.pid
@@ -435,6 +444,7 @@ app.get('/status', async (_, res) => {
     archives,
     memoryMB,
     usedMemoryMB,
+    cpuUsagePercent: Math.round(cpuUsagePercent * 100) / 100, // Round to 2 decimal places
   });
 });
 
