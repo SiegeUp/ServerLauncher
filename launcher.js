@@ -201,66 +201,65 @@ const serverWatcherLoop = async () => {
     const exe = findExecutable(path.join(BUILDS_DIR, s.version));
     if (!exe) {
       const msg = `Executable not found for "${s.version}"`;
-      console.warn(msg);
       serverErrors.set(s.port, msg);
       continue;
     }
 
     const logDir = path.join(LOGS_DIR, `${s.port}`);
-    cleanUpLogDirectory(logDir);
+    await cleanUpLogDirectory(logDir);
 
     try {
       const now = new Date().toISOString().replace(/[:.]/g, '-');
       const logFile = path.join(logDir, `${now}.log`);
+      
+      fs.mkdirSync(logDir, { recursive: true });
 
-      const child = spawn(exe, [
-        `-logFile`, logFile,
-        '--server-port', s.port,
-        '--server_port', s.port,
+      const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+
+      const spawnArgs = [
+        '-batchmode',
+        '-nographics',
+        '-logFile', logFile, 
+        '--server-port', s.port.toString(),
         ...s.args
-      ]);
+      ];
 
-      const tailN = 20;
-      const stderrLines = [];
-      child.stderr?.on('data', data => {
-        const lines = data.toString().split('\n').filter(Boolean);
-        stderrLines.push(...lines);
-        if (stderrLines.length > tailN)
-          stderrLines.splice(0, stderrLines.length - tailN);
+      const child = spawn(exe, spawnArgs, {
+        cwd: path.dirname(exe), 
+        env: {
+          ...process.env,
+          UNITY_LOG_FILE: logFile 
+        }
       });
+
+      child.stdout.pipe(logStream);
+      child.stderr.pipe(logStream);
 
       children.set(s.port, child);
-
-      console.log(`Started server ${s.port} with version "${s.version}"`);
+      console.log(`Started server ${s.port} (PID: ${child.pid})`);
 
       child.on('exit', async (code, signal) => {
-        const sErr = stderrLines.join('\n');
-
-        if (signal) { // Check if the exit was due to a signal
-          console.warn(`Server ${s.port} exited due to signal: ${signal}\n${sErr}`);
-          serverErrors.set(s.port, `Exited due to signal: ${signal}\n${sErr}`);
-        } else if (code !== 0) { // Check if the exit was due to a non-zero exit code
-          console.warn(`Server ${s.port} exited with code ${code}\n${sErr}`);
-          serverErrors.set(s.port, `Exited with code ${code}\n${sErr}`);
+        logStream.end();
+        
+        if (code !== 0 || signal) {
+          const reason = signal ? `killed by signal ${signal}` : `exit code ${code}`;
+          const crashMsg = `Server ${s.port} crashed/exited (${reason}). Check logs: ${path.basename(logFile)}`;
+          console.error(crashMsg);
+          serverErrors.set(s.port, crashMsg);
         }
 
-        await waitForPortToBeFree(port, 2000);
-
-        if (await isPortFree(s.port)) {
-          children.delete(s.port);
-        }
-      });
-
-      child.on('error', err => {
-        const msg = `Error in server ${s.port}: ${err.message}`;
-        console.error(msg);
-        serverErrors.set(s.port, msg);
+        await waitForPortToBeFree(s.port, 2000);
         children.delete(s.port);
       });
+
+      child.on('error', (err) => {
+        logStream.end();
+        serverErrors.set(s.port, `Spawn Error: ${err.message}`);
+        children.delete(s.port);
+      });
+
     } catch (err) {
-      const msg = `Failed to start server ${s.port}: ${err.message}`;
-      console.error(msg);
-      serverErrors.set(s.port, msg);
+      serverErrors.set(s.port, `Launcher Error: ${err.message}`);
     }
   }
 };
@@ -378,25 +377,39 @@ app.get('/logs/:port', (req, res) => {
   const index = parseInt(req.query.index || '0', 10);
   const logDir = path.join(LOGS_DIR, `${port}`);
 
-  if (!fs.existsSync(logDir))
-    return res.status(404).json({ error: 'No logs for this port' });
+  if (!fs.existsSync(logDir)) return res.status(404).json({ error: 'No logs' });
 
   const files = fs.readdirSync(logDir)
     .filter(f => f.endsWith('.log'))
     .map(f => ({ name: f, time: fs.statSync(path.join(logDir, f)).mtime }))
     .sort((a, b) => b.time - a.time);
 
-  if (index >= files.length)
-    return res.status(404).json({ error: 'Log index out of range' });
+  if (index >= files.length) return res.status(404).json({ error: 'Index out of range' });
 
-  const file = files[index];
-  let filePath = path.join(logDir, file.name);
+  const filePath = path.join(logDir, files[index].name);
 
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Log file not found' });
+  // Use a stream or limit the size (e.g., last 1MB) to prevent memory crashes
+  const stats = fs.statSync(filePath);
+  const maxSize = 2 * 1024 * 1024; // 2MB limit for the API response
+  
+  if (stats.size > maxSize) {
+    const stream = fs.createReadStream(filePath, { start: stats.size - maxSize });
+    let data = '';
+    stream.on('data', chunk => data += chunk);
+    stream.on('end', () => {
+      res.json({ 
+        data: "[Truncated...]\n" + data, 
+        name: files[index].name, 
+        fullSize: stats.size 
+      });
+    });
+  } else {
+    res.json({ 
+      data: fs.readFileSync(filePath, 'utf8'), 
+      name: files[index].name,
+      fullSize: stats.size
+    });
   }
-  const fileContent = fs.readFileSync(filePath, 'utf8');
-  res.json({ data: fileContent, name: file.name, launchTime: file.time.toISOString() });
 });
 
 app.get('/status', async (_, res) => {
