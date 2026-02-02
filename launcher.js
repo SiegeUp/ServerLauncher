@@ -12,6 +12,7 @@ import multer from 'multer';
 import unzipper from 'unzipper';
 import { spawn } from 'child_process';
 import osu from 'node-os-utils';
+import { Transform } from 'stream'; 
 
 const HOME = os.homedir();
 const BASE_DIR = process.env.SETTINGS_DIR || path.join(HOME, '.siegeup');
@@ -193,93 +194,120 @@ async function cleanUpLogDirectory(logDir) {
   }
 }
 
-const serverWatcherLoop = async () => {
-  for (const s of settings.servers) {
-    if (children.has(s.port)) continue;
-    if (!s.run) continue;
-
-    const exe = findExecutable(path.join(BUILDS_DIR, s.version));
-    if (!exe) {
-      const msg = `Executable not found for "${s.version}"`;
-      serverErrors.set(s.port, msg);
-      continue;
-    }
-
-    const logDir = path.join(LOGS_DIR, `${s.port}`);
-    await cleanUpLogDirectory(logDir);
-
-    try {
-      const now = new Date().toISOString().replace(/[:.]/g, '-');
-      const logFile = path.join(logDir, `${now}.log`);
+const createTimestampTransform = () => {
+  return new Transform({
+    transform(chunk, encoding, callback) {
+      // Initialize leftover buffer if it doesn't exist
+      if (this._leftover === undefined) this._leftover = '';
       
-      fs.mkdirSync(logDir, { recursive: true });
+      const lines = (this._leftover + chunk.toString()).split('\n');
+      this._leftover = lines.pop(); // Save the partial line for the next chunk
 
-      const logStream = fs.createWriteStream(logFile, { flags: 'a' });
-
-      const spawnArgs = [
-        '-batchmode',
-        '-nographics',
-        '-logFile', logFile, 
-        '--server-port', s.port.toString(),
-        ...s.args
-      ];
-
-      const child = spawn(exe, spawnArgs, {
-        cwd: path.dirname(exe), 
-        env: {
-          ...process.env,
-          UNITY_LOG_FILE: logFile 
-        }
-      });
-
-      child.stdout.pipe(logStream);
-      child.stderr.pipe(logStream);
-
-      children.set(s.port, child);
-      console.log(`Started server ${s.port} (PID: ${child.pid})`);
-
-      child.on('exit', async (code, signal) => {
-        logStream.end();
-        
-        if (code !== 0 || signal) {
-          const reason = signal ? `killed by signal ${signal}` : `exit code ${code}`;
-          const crashMsg = `Server ${s.port} crashed/exited (${reason}). Check logs: ${path.basename(logFile)}`;
-          console.error(crashMsg);
-          serverErrors.set(s.port, crashMsg);
-        }
-
-        await waitForPortToBeFree(s.port, 2000);
-        children.delete(s.port);
-      });
-
-      child.on('error', (err) => {
-        logStream.end();
-        serverErrors.set(s.port, `Spawn Error: ${err.message}`);
-        children.delete(s.port);
-      });
-
-    } catch (err) {
-      serverErrors.set(s.port, `Launcher Error: ${err.message}`);
+      const timestamp = `[${new Date().toISOString()}] `;
+      const output = lines.map(line => timestamp + line).join('\n') + (lines.length > 0 ? '\n' : '');
+      
+      callback(null, output);
+    },
+    flush(callback) {
+      // Write out any remaining text in the buffer
+      if (this._leftover) {
+        callback(null, `[${new Date().toISOString()}] ` + this._leftover + '\n');
+      } else {
+        callback();
+      }
     }
-  }
+  });
+};
+
+const serverWatcherLoop = async () => {
+    for (const s of settings.servers) {
+        if (children.has(s.port)) continue;
+        if (!s.run) continue;
+
+        const exe = findExecutable(path.join(BUILDS_DIR, s.version));
+        if (!exe) {
+            const msg = `Executable not found for "${s.version}"`;
+            serverErrors.set(s.port, msg);
+            continue;
+        }
+
+        const logDir = path.join(LOGS_DIR, `${s.port}`);
+        await cleanUpLogDirectory(logDir);
+
+        try {
+            const now = new Date().toISOString().replace(/[:.]/g, '-');
+            const logFile = path.join(logDir, `${now}.log`);
+            fs.mkdirSync(logDir, { recursive: true });
+
+            const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+
+            // 1. USE "-logFile -" to pipe Unity logs into stdout
+            const spawnArgs = [
+                '-batchmode',
+                '-nographics',
+                '-logFile', '-', // Hyphen sends logs to stdout
+                '--server-port', s.port.toString(),
+                ...s.args
+            ];
+
+            const child = spawn(exe, spawnArgs, {
+                cwd: path.dirname(exe),
+                env: { ...process.env }
+            });
+
+            // 2. CREATE TRANSFORMS for stdout and stderr
+            const tsStdout = createTimestampTransform();
+            const tsStderr = createTimestampTransform();
+
+            // Pipe: Child -> Timestamp Transformer -> File
+            child.stdout.pipe(tsStdout).pipe(logStream);
+            child.stderr.pipe(tsStderr).pipe(logStream);
+
+            children.set(s.port, child);
+            console.log(`Started server ${s.port} (PID: ${child.pid})`);
+
+            child.on('exit', async (code, signal) => {
+                logStream.end();
+
+                if (code !== 0 || signal) {
+                    const reason = signal ? `killed by signal ${signal}` : `exit code ${code}`;
+                    const crashMsg = `Server ${s.port} crashed/exited (${reason}). Check logs: ${path.basename(logFile)}`;
+                    console.error(crashMsg);
+                    serverErrors.set(s.port, crashMsg);
+                }
+
+                await waitForPortToBeFree(s.port, 2000);
+                children.delete(s.port);
+            });
+
+            child.on('error', (err) => {
+                logStream.end();
+                serverErrors.set(s.port, `Spawn Error: ${err.message}`);
+                children.delete(s.port);
+            });
+
+        } catch (err) {
+            serverErrors.set(s.port, `Launcher Error: ${err.message}`);
+        }
+    }
 };
 setInterval(serverWatcherLoop, watchIntervalMs);
 
 app.post('/upload', upload.single('gameZip'), async (req, res) => {
-  const version = path.basename(req.file.originalname, '.zip') || `archive_${Date.now()}`;
-  const targetPath = path.join(BUILDS_DIR, version);
+    const version = path.basename(req.file.originalname, '.zip') || `archive_${Date.now()}`;
+    const targetPath = path.join(BUILDS_DIR, version);
 
-  await fs.createReadStream(req.file.path)
-    .pipe(unzipper.Extract({ path: targetPath }))
-    .promise();
+    await fs.createReadStream(req.file.path)
+        .pipe(unzipper.Extract({ path: targetPath }))
+        .promise();
 
-  const exePath = findExecutable(targetPath);
-  if (exePath) fs.chmodSync(exePath, 0o755);
+    const exePath = findExecutable(targetPath);
+    if (exePath) fs.chmodSync(exePath, 0o755);
 
-  fs.unlinkSync(req.file.path);
+    fs.unlinkSync(req.file.path);
 
-  console.log(`Uploaded and extracted ${req.file.originalname} into ${targetPath}`);
-  res.json({ ok: true });
+    console.log(`Uploaded and extracted ${req.file.originalname} into ${targetPath}`);
+    res.json({ ok: true });
 });;
 
 app.post('/launch', async (req, res) => {
