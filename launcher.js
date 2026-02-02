@@ -252,7 +252,13 @@ const serverWatcherLoop = async () => {
 
             const child = spawn(exe, spawnArgs, {
                 cwd: path.dirname(exe),
-                env: { ...process.env }
+                env: {
+                    ...process.env,
+                    // Forces Unity and C-libraries to write lines immediately
+                    UNITY_LOG_FILE: '-',
+                    // This helps ensure the native crash handler flushes to stdout
+                    LD_BIND_NOW: '1'
+                }
             });
 
             // 2. CREATE TRANSFORMS for stdout and stderr
@@ -271,7 +277,7 @@ const serverWatcherLoop = async () => {
 
                 if (code !== 0 || signal) {
                     const reason = signal ? `killed by signal ${signal}` : `exit code ${code}`;
-                    const crashMsg = `Server ${s.port} crashed/exited (${reason}). Check logs: ${path.basename(logFile)}`;
+                    const crashMsg = `Server ${s.port} crashed/exited (${reason}) at [${exitTime}]`;
                     console.error(crashMsg);
                     serverErrors.set(s.port, crashMsg);
                 }
