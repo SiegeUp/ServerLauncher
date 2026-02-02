@@ -273,6 +273,7 @@ const serverWatcherLoop = async () => {
             console.log(`Started server ${s.port} (PID: ${child.pid})`);
 
             child.on('exit', async (code, signal) => {
+                const exitTime = new Date().toISOString(); 
                 logStream.end();
 
                 if (code !== 0 || signal) {
