@@ -254,9 +254,6 @@ const serverWatcherLoop = async () => {
         cwd: path.dirname(exe),
         env: {
           ...process.env,
-          // Forces Unity and C-libraries to write lines immediately
-          UNITY_LOG_FILE: '-',
-          // This helps ensure the native crash handler flushes to stdout
           LD_BIND_NOW: '1'
         }
       });
