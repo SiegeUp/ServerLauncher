@@ -220,83 +220,83 @@ const createTimestampTransform = () => {
 };
 
 const serverWatcherLoop = async () => {
-    for (const s of settings.servers) {
-        if (children.has(s.port)) continue;
-        if (!s.run) continue;
+  for (const s of settings.servers) {
+    if (children.has(s.port)) continue;
+    if (!s.run) continue;
 
-        const exe = findExecutable(path.join(BUILDS_DIR, s.version));
-        if (!exe) {
-            const msg = `Executable not found for "${s.version}"`;
-            serverErrors.set(s.port, msg);
-            continue;
-        }
-
-        const logDir = path.join(LOGS_DIR, `${s.port}`);
-        await cleanUpLogDirectory(logDir);
-
-        try {
-            const now = new Date().toISOString().replace(/[:.]/g, '-');
-            const logFile = path.join(logDir, `${now}.log`);
-            fs.mkdirSync(logDir, { recursive: true });
-
-            const logStream = fs.createWriteStream(logFile, { flags: 'a' });
-
-            // 1. USE "-logFile -" to pipe Unity logs into stdout
-            const spawnArgs = [
-                '-batchmode',
-                '-nographics',
-                '-logFile', '-', // Hyphen sends logs to stdout
-                '--server-port', s.port.toString(),
-                ...s.args
-            ];
-
-            const child = spawn(exe, spawnArgs, {
-                cwd: path.dirname(exe),
-                env: {
-                    ...process.env,
-                    // Forces Unity and C-libraries to write lines immediately
-                    UNITY_LOG_FILE: '-',
-                    // This helps ensure the native crash handler flushes to stdout
-                    LD_BIND_NOW: '1'
-                }
-            });
-
-            // 2. CREATE TRANSFORMS for stdout and stderr
-            const tsStdout = createTimestampTransform();
-            const tsStderr = createTimestampTransform();
-
-            // Pipe: Child -> Timestamp Transformer -> File
-            child.stdout.pipe(tsStdout).pipe(logStream);
-            child.stderr.pipe(tsStderr).pipe(logStream);
-
-            children.set(s.port, child);
-            console.log(`Started server ${s.port} (PID: ${child.pid})`);
-
-            child.on('exit', async (code, signal) => {
-                const exitTime = new Date().toISOString(); 
-                logStream.end();
-
-                if (code !== 0 || signal) {
-                    const reason = signal ? `killed by signal ${signal}` : `exit code ${code}`;
-                    const crashMsg = `Server ${s.port} crashed/exited (${reason}) at [${exitTime}]`;
-                    console.error(crashMsg);
-                    serverErrors.set(s.port, crashMsg);
-                }
-
-                await waitForPortToBeFree(s.port, 2000);
-                children.delete(s.port);
-            });
-
-            child.on('error', (err) => {
-                logStream.end();
-                serverErrors.set(s.port, `Spawn Error: ${err.message}`);
-                children.delete(s.port);
-            });
-
-        } catch (err) {
-            serverErrors.set(s.port, `Launcher Error: ${err.message}`);
-        }
+    const exe = findExecutable(path.join(BUILDS_DIR, s.version));
+    if (!exe) {
+      const msg = `Executable not found for "${s.version}"`;
+      serverErrors.set(s.port, msg);
+      continue;
     }
+
+    const logDir = path.join(LOGS_DIR, `${s.port}`);
+    await cleanUpLogDirectory(logDir);
+
+    try {
+      const now = new Date().toISOString().replace(/[:.]/g, '-');
+      const logFile = path.join(logDir, `${now}.log`);
+      fs.mkdirSync(logDir, { recursive: true });
+
+      const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+
+      // 1. USE "-logFile -" to pipe Unity logs into stdout
+      const spawnArgs = [
+        '-batchmode',
+        '-nographics',
+        // Unity will now default to creating a Player.log file
+        '--server-port', s.port.toString(),
+        ...s.args
+      ];
+
+      const child = spawn(exe, spawnArgs, {
+        cwd: path.dirname(exe),
+        env: {
+          ...process.env,
+          // Forces Unity and C-libraries to write lines immediately
+          UNITY_LOG_FILE: '-',
+          // This helps ensure the native crash handler flushes to stdout
+          LD_BIND_NOW: '1'
+        }
+      });
+
+      // 2. CREATE TRANSFORMS for stdout and stderr
+      // const tsStdout = createTimestampTransform();
+      // const tsStderr = createTimestampTransform();
+
+      // // Pipe: Child -> Timestamp Transformer -> File
+      // child.stdout.pipe(tsStdout).pipe(logStream);
+      // child.stderr.pipe(tsStderr).pipe(logStream);
+
+      children.set(s.port, child);
+      console.log(`Started server ${s.port} (PID: ${child.pid})`);
+
+      child.on('exit', async (code, signal) => {
+        const exitTime = new Date().toISOString();
+        logStream.end();
+
+        if (code !== 0 || signal) {
+          const reason = signal ? `killed by signal ${signal}` : `exit code ${code}`;
+          const crashMsg = `Server ${s.port} crashed/exited (${reason}) at [${exitTime}]`;
+          console.error(crashMsg);
+          serverErrors.set(s.port, crashMsg);
+        }
+
+        await waitForPortToBeFree(s.port, 2000);
+        children.delete(s.port);
+      });
+
+      child.on('error', (err) => {
+        logStream.end();
+        serverErrors.set(s.port, `Spawn Error: ${err.message}`);
+        children.delete(s.port);
+      });
+
+    } catch (err) {
+      serverErrors.set(s.port, `Launcher Error: ${err.message}`);
+    }
+  }
 };
 setInterval(serverWatcherLoop, watchIntervalMs);
 
