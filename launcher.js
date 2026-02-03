@@ -220,75 +220,76 @@ const createTimestampTransform = () => {
 };
 
 const serverWatcherLoop = async () => {
-    for (const s of settings.servers) {
-        if (children.has(s.port)) continue;
-        if (!s.run) continue;
+  for (const s of settings.servers) {
+    if (children.has(s.port)) continue;
+    if (!s.run) continue;
 
-        const exe = findExecutable(path.join(BUILDS_DIR, s.version));
-        if (!exe) {
-            serverErrors.set(s.port, `Executable not found for "${s.version}"`);
-            continue;
-        }
-
-        const logDir = path.join(LOGS_DIR, `${s.port}`);
-        await cleanUpLogDirectory(logDir);
-
-        try {
-            const now = new Date().toISOString().replace(/[:.]/g, '-');
-            const logFile = path.join(logDir, `${now}.log`);
-            const logStream = fs.createWriteStream(logFile, { flags: 'a' });
-
-            const gameArgs = [
-                '-batchmode',
-                '-nographics',
-                '-logFile', '-',
-                '--server-port', s.port.toString(),
-                ...s.args
-            ];
-
-            const gdbArgs = [
-                '-batch',
-                '-return-child-result',
-                '-ex', 'handle SIGPWR nostop noprint',
-                '-ex', 'handle SIGXCPU nostop noprint',
-                '-ex', 'run',
-                '-ex', 'thread apply all bt',
-                '-ex', 'quit',
-                '--args', exe, ...gameArgs
-            ];
-
-            const child = spawn('gdb', gdbArgs, {
-                cwd: path.dirname(exe),
-                env: {
-                    ...process.env,
-                    UNITY_LOG_FILE: '-',
-                    LD_BIND_NOW: '1'
-                }
-            });
-
-            const tsStdout = createTimestampTransform();
-            const tsStderr = createTimestampTransform();
-
-            child.stdout.pipe(tsStdout).pipe(logStream);
-            child.stderr.pipe(tsStderr).pipe(logStream);
-
-            children.set(s.port, child);
-            console.log(`Started server ${s.port} under GDB (PID: ${child.pid})`);
-
-            child.on('exit', async (code, signal) => {
-                logStream.end();
-                if (code !== 0) {
-                    const msg = `Server ${s.port} crashed. Check logs for GDB Backtrace.`;
-                    serverErrors.set(s.port, msg);
-                }
-                await waitForPortToBeFree(s.port, 2000);
-                children.delete(s.port);
-            });
-
-        } catch (err) {
-            serverErrors.set(s.port, `Launcher Error: ${err.message}`);
-        }
+    const exe = findExecutable(path.join(BUILDS_DIR, s.version));
+    if (!exe) {
+      serverErrors.set(s.port, `Executable not found for "${s.version}"`);
+      continue;
     }
+
+    const logDir = path.join(LOGS_DIR, `${s.port}`);
+    await cleanUpLogDirectory(logDir);
+
+    try {
+      const now = new Date().toISOString().replace(/[:.]/g, '-');
+      const logFile = path.join(logDir, `${now}.log`);
+      const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+
+      const gameArgs = [
+        '-batchmode',
+        '-nographics',
+        '-logFile', '-',
+        '--server-port', s.port.toString(),
+        ...s.args
+      ];
+
+      const gdbArgs = [
+        '-batch',
+        '-return-child-result',
+        '-ex', 'handle SIGPWR nostop noprint',
+        '-ex', 'handle SIGXCPU nostop noprint',
+        '-ex', 'run',
+        '-ex', 'thread apply all bt',
+        '-ex', 'quit',
+        '--args', exe, ...gameArgs
+      ];
+
+      const child = spawn('gdb', gdbArgs, {
+        cwd: path.dirname(exe),
+        env: {
+          ...process.env,
+          MONO_XDEBUG: "1",     
+          MONO_LOG_LEVEL: "info",
+          MONO_LOG_MASK: "asm",  
+        }
+      });
+
+      const tsStdout = createTimestampTransform();
+      const tsStderr = createTimestampTransform();
+
+      child.stdout.pipe(tsStdout).pipe(logStream);
+      child.stderr.pipe(tsStderr).pipe(logStream);
+
+      children.set(s.port, child);
+      console.log(`Started server ${s.port} under GDB (PID: ${child.pid})`);
+
+      child.on('exit', async (code, signal) => {
+        logStream.end();
+        if (code !== 0) {
+          const msg = `Server ${s.port} crashed. Check logs for GDB Backtrace.`;
+          serverErrors.set(s.port, msg);
+        }
+        await waitForPortToBeFree(s.port, 2000);
+        children.delete(s.port);
+      });
+
+    } catch (err) {
+      serverErrors.set(s.port, `Launcher Error: ${err.message}`);
+    }
+  }
 };
 setInterval(serverWatcherLoop, watchIntervalMs);
 
