@@ -226,8 +226,7 @@ const serverWatcherLoop = async () => {
 
         const exe = findExecutable(path.join(BUILDS_DIR, s.version));
         if (!exe) {
-            const msg = `Executable not found for "${s.version}"`;
-            serverErrors.set(s.port, msg);
+            serverErrors.set(s.port, `Executable not found for "${s.version}"`);
             continue;
         }
 
@@ -237,59 +236,52 @@ const serverWatcherLoop = async () => {
         try {
             const now = new Date().toISOString().replace(/[:.]/g, '-');
             const logFile = path.join(logDir, `${now}.log`);
-            fs.mkdirSync(logDir, { recursive: true });
-
             const logStream = fs.createWriteStream(logFile, { flags: 'a' });
 
-            // 1. USE "-logFile -" to pipe Unity logs into stdout
-            const spawnArgs = [
+            const gameArgs = [
                 '-batchmode',
                 '-nographics',
-                '-logFile', '-', // Hyphen sends logs to stdout
+                '-logFile', '-',
                 '--server-port', s.port.toString(),
                 ...s.args
             ];
 
-            const child = spawn(exe, spawnArgs, {
+            const gdbArgs = [
+                '-batch',
+                '-return-child-result',
+                '-ex', 'handle SIGPWR nostop noprint',
+                '-ex', 'handle SIGXCPU nostop noprint',
+                '-ex', 'run',
+                '-ex', 'thread apply all bt',
+                '-ex', 'quit',
+                '--args', exe, ...gameArgs
+            ];
+
+            const child = spawn('gdb', gdbArgs, {
                 cwd: path.dirname(exe),
                 env: {
                     ...process.env,
-                    // Forces Unity and C-libraries to write lines immediately
                     UNITY_LOG_FILE: '-',
-                    // This helps ensure the native crash handler flushes to stdout
                     LD_BIND_NOW: '1'
                 }
             });
 
-            // 2. CREATE TRANSFORMS for stdout and stderr
             const tsStdout = createTimestampTransform();
             const tsStderr = createTimestampTransform();
 
-            // Pipe: Child -> Timestamp Transformer -> File
             child.stdout.pipe(tsStdout).pipe(logStream);
             child.stderr.pipe(tsStderr).pipe(logStream);
 
             children.set(s.port, child);
-            console.log(`Started server ${s.port} (PID: ${child.pid})`);
+            console.log(`Started server ${s.port} under GDB (PID: ${child.pid})`);
 
             child.on('exit', async (code, signal) => {
-                const exitTime = new Date().toISOString(); 
                 logStream.end();
-
-                if (code !== 0 || signal) {
-                    const reason = signal ? `killed by signal ${signal}` : `exit code ${code}`;
-                    const crashMsg = `Server ${s.port} crashed/exited (${reason}) at [${exitTime}]`;
-                    console.error(crashMsg);
-                    serverErrors.set(s.port, crashMsg);
+                if (code !== 0) {
+                    const msg = `Server ${s.port} crashed. Check logs for GDB Backtrace.`;
+                    serverErrors.set(s.port, msg);
                 }
-
                 await waitForPortToBeFree(s.port, 2000);
-                children.delete(s.port);
-            });
-
-            child.on('error', (err) => {
-                logStream.end();
-                serverErrors.set(s.port, `Spawn Error: ${err.message}`);
                 children.delete(s.port);
             });
 
