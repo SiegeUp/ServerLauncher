@@ -12,7 +12,6 @@ import multer from 'multer';
 import unzipper from 'unzipper';
 import { spawn } from 'child_process';
 import osu from 'node-os-utils';
-import { Transform } from 'stream'; 
 
 const HOME = os.homedir();
 const BASE_DIR = process.env.SETTINGS_DIR || path.join(HOME, '.siegeup');
@@ -194,31 +193,6 @@ async function cleanUpLogDirectory(logDir) {
   }
 }
 
-const createTimestampTransform = () => {
-  return new Transform({
-    transform(chunk, encoding, callback) {
-      // Initialize leftover buffer if it doesn't exist
-      if (this._leftover === undefined) this._leftover = '';
-      
-      const lines = (this._leftover + chunk.toString()).split('\n');
-      this._leftover = lines.pop(); // Save the partial line for the next chunk
-
-      const timestamp = `[${new Date().toISOString()}] `;
-      const output = lines.map(line => timestamp + line).join('\n') + (lines.length > 0 ? '\n' : '');
-      
-      callback(null, output);
-    },
-    flush(callback) {
-      // Write out any remaining text in the buffer
-      if (this._leftover) {
-        callback(null, `[${new Date().toISOString()}] ` + this._leftover + '\n');
-      } else {
-        callback();
-      }
-    }
-  });
-};
-
 const serverWatcherLoop = async () => {
   for (const s of settings.servers) {
     if (children.has(s.port)) continue;
@@ -226,88 +200,87 @@ const serverWatcherLoop = async () => {
 
     const exe = findExecutable(path.join(BUILDS_DIR, s.version));
     if (!exe) {
-      serverErrors.set(s.port, `Executable not found for "${s.version}"`);
+      const msg = `Executable not found for "${s.version}"`;
+      console.warn(msg);
+      serverErrors.set(s.port, msg);
       continue;
     }
 
     const logDir = path.join(LOGS_DIR, `${s.port}`);
-    await cleanUpLogDirectory(logDir);
+    cleanUpLogDirectory(logDir);
 
     try {
       const now = new Date().toISOString().replace(/[:.]/g, '-');
       const logFile = path.join(logDir, `${now}.log`);
-      const logStream = fs.createWriteStream(logFile, { flags: 'a' });
 
-      const gameArgs = [
-        '-batchmode',
-        '-nographics',
-        '-logFile', '-',
-        '--server-port', s.port.toString(),
+      const child = spawn(exe, [
+        `-logFile`, logFile,
+        '--server-port', s.port,
+        '--server_port', s.port,
         ...s.args
-      ];
+      ]);
 
-      const gdbArgs = [
-        '-batch',
-        '-return-child-result',
-        '-ex', 'handle SIGPWR nostop noprint',
-        '-ex', 'handle SIGXCPU nostop noprint',
-        '-ex', 'run',
-        '-ex', 'thread apply all bt',
-        '-ex', 'quit',
-        '--args', exe, ...gameArgs
-      ];
-
-      const child = spawn('gdb', gdbArgs, {
-        cwd: path.dirname(exe),
-        env: {
-          ...process.env,
-          MONO_XDEBUG: "1",     
-          MONO_LOG_LEVEL: "info",
-          MONO_LOG_MASK: "asm",  
-        }
+      const tailN = 20;
+      const stderrLines = [];
+      child.stderr?.on('data', data => {
+        const lines = data.toString().split('\n').filter(Boolean);
+        stderrLines.push(...lines);
+        if (stderrLines.length > tailN)
+          stderrLines.splice(0, stderrLines.length - tailN);
       });
-
-      const tsStdout = createTimestampTransform();
-      const tsStderr = createTimestampTransform();
-
-      child.stdout.pipe(tsStdout).pipe(logStream);
-      child.stderr.pipe(tsStderr).pipe(logStream);
 
       children.set(s.port, child);
-      console.log(`Started server ${s.port} under GDB (PID: ${child.pid})`);
+
+      console.log(`Started server ${s.port} with version "${s.version}"`);
 
       child.on('exit', async (code, signal) => {
-        logStream.end();
-        if (code !== 0) {
-          const msg = `Server ${s.port} crashed. Check logs for GDB Backtrace.`;
-          serverErrors.set(s.port, msg);
+        const sErr = stderrLines.join('\n');
+
+        if (signal) { // Check if the exit was due to a signal
+          console.warn(`Server ${s.port} exited due to signal: ${signal}\n${sErr}`);
+          serverErrors.set(s.port, `Exited due to signal: ${signal}\n${sErr}`);
+        } else if (code !== 0) { // Check if the exit was due to a non-zero exit code
+          console.warn(`Server ${s.port} exited with code ${code}\n${sErr}`);
+          serverErrors.set(s.port, `Exited with code ${code}\n${sErr}`);
         }
-        await waitForPortToBeFree(s.port, 2000);
-        children.delete(s.port);
+
+        await waitForPortToBeFree(port, 2000);
+
+        if (await isPortFree(s.port)) {
+          children.delete(s.port);
+        }
       });
 
+      child.on('error', err => {
+        const msg = `Error in server ${s.port}: ${err.message}`;
+        console.error(msg);
+        serverErrors.set(s.port, msg);
+        children.delete(s.port);
+      });
     } catch (err) {
-      serverErrors.set(s.port, `Launcher Error: ${err.message}`);
+      const msg = `Failed to start server ${s.port}: ${err.message}`;
+      console.error(msg);
+      serverErrors.set(s.port, msg);
     }
   }
 };
 setInterval(serverWatcherLoop, watchIntervalMs);
 
 app.post('/upload', upload.single('gameZip'), async (req, res) => {
-    const version = path.basename(req.file.originalname, '.zip') || `archive_${Date.now()}`;
-    const targetPath = path.join(BUILDS_DIR, version);
+  const version = path.basename(req.file.originalname, '.zip') || `archive_${Date.now()}`;
+  const targetPath = path.join(BUILDS_DIR, version);
 
-    await fs.createReadStream(req.file.path)
-        .pipe(unzipper.Extract({ path: targetPath }))
-        .promise();
+  await fs.createReadStream(req.file.path)
+    .pipe(unzipper.Extract({ path: targetPath }))
+    .promise();
 
-    const exePath = findExecutable(targetPath);
-    if (exePath) fs.chmodSync(exePath, 0o755);
+  const exePath = findExecutable(targetPath);
+  if (exePath) fs.chmodSync(exePath, 0o755);
 
-    fs.unlinkSync(req.file.path);
+  fs.unlinkSync(req.file.path);
 
-    console.log(`Uploaded and extracted ${req.file.originalname} into ${targetPath}`);
-    res.json({ ok: true });
+  console.log(`Uploaded and extracted ${req.file.originalname} into ${targetPath}`);
+  res.json({ ok: true });
 });;
 
 app.post('/launch', async (req, res) => {
@@ -405,39 +378,25 @@ app.get('/logs/:port', (req, res) => {
   const index = parseInt(req.query.index || '0', 10);
   const logDir = path.join(LOGS_DIR, `${port}`);
 
-  if (!fs.existsSync(logDir)) return res.status(404).json({ error: 'No logs' });
+  if (!fs.existsSync(logDir))
+    return res.status(404).json({ error: 'No logs for this port' });
 
   const files = fs.readdirSync(logDir)
     .filter(f => f.endsWith('.log'))
     .map(f => ({ name: f, time: fs.statSync(path.join(logDir, f)).mtime }))
     .sort((a, b) => b.time - a.time);
 
-  if (index >= files.length) return res.status(404).json({ error: 'Index out of range' });
+  if (index >= files.length)
+    return res.status(404).json({ error: 'Log index out of range' });
 
-  const filePath = path.join(logDir, files[index].name);
+  const file = files[index];
+  let filePath = path.join(logDir, file.name);
 
-  // Use a stream or limit the size (e.g., last 1MB) to prevent memory crashes
-  const stats = fs.statSync(filePath);
-  const maxSize = 2 * 1024 * 1024; // 2MB limit for the API response
-  
-  if (stats.size > maxSize) {
-    const stream = fs.createReadStream(filePath, { start: stats.size - maxSize });
-    let data = '';
-    stream.on('data', chunk => data += chunk);
-    stream.on('end', () => {
-      res.json({ 
-        data: "[Truncated...]\n" + data, 
-        name: files[index].name, 
-        fullSize: stats.size 
-      });
-    });
-  } else {
-    res.json({ 
-      data: fs.readFileSync(filePath, 'utf8'), 
-      name: files[index].name,
-      fullSize: stats.size
-    });
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Log file not found' });
   }
+  const fileContent = fs.readFileSync(filePath, 'utf8');
+  res.json({ data: fileContent, name: file.name, launchTime: file.time.toISOString() });
 });
 
 app.get('/status', async (_, res) => {
