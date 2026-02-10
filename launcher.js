@@ -158,10 +158,18 @@ const shutdownChild = async (port, child) => {
 
 function isPortFree(port) {
   return new Promise(resolve => {
-    const tester = net.createServer();
-    tester.once('error', () => resolve(false));
-    tester.once('listening', () => tester.close(() => resolve(true)));
-    tester.listen(port, '0.0.0.0');
+    try {
+      const tester = net.createServer();
+      tester.once('error', () => resolve(false));
+      tester.once('listening', () => {
+        tester.close(() => resolve(true));
+      });
+      tester.on('close', () => {}); // Prevent unhandled close errors
+      tester.listen(port, '0.0.0.0');
+    } catch (err) {
+      console.error(`isPortFree error for port ${port}:`, err.message);
+      resolve(false);
+    }
   });
 }
 
@@ -189,7 +197,7 @@ async function cleanUpLogDirectory(logDir) {
       }
     }
   } catch (err) {
-    console.error(`Error clean up log directory for port ${s.port}:`, err);
+    console.error(`Error cleaning up log directory ${logDir}:`, err);
   }
 }
 
@@ -244,7 +252,7 @@ const serverWatcherLoop = async () => {
           serverErrors.set(s.port, `Exited with code ${code}\n${sErr}`);
         }
 
-        await waitForPortToBeFree(port, 2000);
+        await waitForPortToBeFree(s.port, 2000);
 
         if (await isPortFree(s.port)) {
           children.delete(s.port);
