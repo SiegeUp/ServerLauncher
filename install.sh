@@ -49,3 +49,9 @@ EOF
 # 5) Enable and start the service
 systemctl daemon-reload
 systemctl enable --now siegeup-launcher
+
+# 6) Grant Alloy access to game server logs (if Alloy is installed)
+if id alloy &>/dev/null; then
+  usermod -aG siegeuplauncher alloy
+  systemctl restart alloy
+fi
